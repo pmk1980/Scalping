@@ -1,0 +1,17 @@
+[Unit]
+Description=Bitget Institutional Quant Trading Bot (v3.0)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Scalping
+ExecStart=/home/ubuntu/Scalping/venv/bin/python -u bot.py
+Restart=always
+RestartSec=10
+EnvironmentFile=/home/ubuntu/Scalping/.env
+StandardOutput=append:/home/ubuntu/Scalping/bot.log
+StandardError=append:/home/ubuntu/Scalping/bot_error.log
+
+[Install]
+WantedBy=multi-user.target
