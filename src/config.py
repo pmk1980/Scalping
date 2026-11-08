@@ -42,6 +42,14 @@ class BotConfig:
     donchian_period: int = 20                         # 20개봉(80시간) 채널 돌파
     macro_ema_period: int = 200                       # 200 EMA 거시 추세 필터 (하락장 현금 100% 관망)
 
+    # 7-1. 가짜 돌파(Fakeout) 방지 및 본전 이익보존(Break-Even) 보완 파라미터
+    use_break_even: bool = os.getenv("USE_BREAK_EVEN", "True").lower() in ("true", "1", "yes") # 본전 스탑 활성화
+    break_even_trigger_ratio: float = float(os.getenv("BREAK_EVEN_TRIGGER_RATIO", "0.020"))    # +2.0% 수익 도달 시 본전(+0.2%) 이동
+    use_volume_filter: bool = os.getenv("USE_VOLUME_FILTER", "True").lower() in ("true", "1", "yes") # 거래량 필터 활성화
+    volume_filter_ratio: float = float(os.getenv("VOLUME_FILTER_RATIO", "0.80"))              # 20봉 평균 거래량의 80% 이상
+    max_rsi_entry: float = float(os.getenv("MAX_RSI_ENTRY", "78.0"))                          # 과열 꼭대기 매수 차단 (RSI 상한)
+    min_adx_entry: float = float(os.getenv("MIN_ADX_ENTRY", "18.0"))                          # 무추세 횡보장 휩소 차단 (ADX 하한)
+
     # 8. 자금 관리 & 다중 서킷 브레이커
     daily_max_loss_ratio: float = float(os.getenv("DAILY_MAX_LOSS_RATIO", "-0.05")) # 일일 -5% 서킷 브레이커
     monthly_max_loss_ratio: float = float(os.getenv("MONTHLY_MAX_LOSS_RATIO", "-0.15")) # 월간 -15% 서킷 브레이커

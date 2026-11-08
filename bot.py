@@ -34,7 +34,13 @@ class QuantTradingBot:
         if self.config.strategy_mode == "DONCHIAN_4H":
             self.strategy = MacroDonchianStrategy(
                 donchian_period=self.config.donchian_period,
-                ema_period=self.config.macro_ema_period
+                ema_period=self.config.macro_ema_period,
+                use_break_even=self.config.use_break_even,
+                break_even_trigger_ratio=self.config.break_even_trigger_ratio,
+                use_volume_filter=self.config.use_volume_filter,
+                volume_filter_ratio=self.config.volume_filter_ratio,
+                max_rsi_entry=self.config.max_rsi_entry,
+                min_adx_entry=self.config.min_adx_entry
             )
         else:
             self.strategy = MultiTimeframeStrategy()
@@ -55,14 +61,15 @@ class QuantTradingBot:
         strat_text = "[bold green]4시간봉 거시 추세 전략 (DONCHIAN_4H, 3년 검증)[/bold green]" if self.config.strategy_mode == "DONCHIAN_4H" else "[bold yellow]5분봉 스캘핑 (SCALPING_5M)[/bold yellow]"
         
         banner = Panel(
-            f"""[bold cyan]Bitget 퀀트 선물 트레이딩 봇 (v3.0)[/bold cyan]
+            f"""[bold cyan]Bitget 퀀트 선물 트레이딩 봇 (v3.1 보완판)[/bold cyan]
 • 거래 대상   : [bold green]{self.config.symbol}[/bold green] (레버리지 [bold magenta]{self.config.leverage}x[/bold magenta] 격리마진)
 • 타임프레임  : [bold white]{self.config.timeframe}[/bold white] (상위: {self.config.htf_timeframe})
 • 전략 모드   : {strat_text}
 • 실행 모드   : {mode_text}
 • 주문 방식   : [bold green]Maker Post-Only (지정가 우선, 수수료 0.02% 최적화)[/bold green]
+• 휩소/손실방어: [bold yellow]본전 스탑({self.config.break_even_trigger_ratio*100:+.1f}%) | 거래량 필터({self.config.volume_filter_ratio*100:.0f}%) | RSI 과열제한({self.config.max_rsi_entry:.0f})[/bold yellow]
 • 자본 관리   : 1회 진입 [bold yellow]{self.config.portfolio_allocation*100:.0f}%[/bold yellow] | 일일 손실한도 {self.config.daily_max_loss_ratio*100:.1f}% | 월간 한도 {self.config.monthly_max_loss_ratio*100:.1f}%""",
-            title="🛡️ Institutional Quant Engine v3.0",
+            title="🛡️ Institutional Quant Engine v3.1",
             border_style="cyan"
         )
         console.print(banner)
@@ -97,9 +104,11 @@ class QuantTradingBot:
             unrealized_pnl = float(position.get("unrealized_pnl", 0.0))
             pnl_color = "bold green" if pnl_pct >= 0 else "bold red"
 
+            be_active = getattr(self.strategy, "break_even_activated", False)
+            sl_text = f"[bold yellow]${sl:,.2f} (본전이익보존 활성)[/bold yellow]" if be_active else f"[red]${sl:,.2f}[/red]"
             table.add_row("포지션 상태", f"[{side_color}]{position['side']} ({position.get('size', 0)} qty)[/{side_color}]")
             table.add_row("진입가 / 현재가", f"${entry_p:,.2f} / ${current_price:,.2f}")
-            table.add_row("추종 스탑선", f"[red]${sl:,.2f}[/red]")
+            table.add_row("추종 스탑선", sl_text)
             table.add_row("미실현 손익", f"[{pnl_color}]{unrealized_pnl:+,.2f} USDT ({pnl_pct:+.2f}%)[/{pnl_color}]")
         else:
             table.add_row("포지션 상태", "[grey50]무포지션 (현금 100% 관망 및 진입 대기)[/grey50]")
@@ -161,6 +170,8 @@ class QuantTradingBot:
                                 reason=last_reason
                             )
                         position = None
+                        if hasattr(self.strategy, "reset_position_tracker"):
+                            self.strategy.reset_position_tracker()
 
                     # 신규 롱 진입 신호 처리
                     elif analysis["signal"] == SignalType.BUY and position is None:
