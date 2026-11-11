@@ -154,6 +154,13 @@ class QuantTradingBot:
                     analysis = self.strategy.analyze(df, current_position=position)
                     last_reason = analysis["reason"]
 
+                    # 포지션 보유 중인 경우 대시보드 및 가상계좌 스탑선 실시간 동기화
+                    if position is not None and "effective_stop" in analysis:
+                        eff_sl = float(analysis["effective_stop"])
+                        position["stop_loss"] = eff_sl
+                        if hasattr(self.exchange, "update_paper_position_stop"):
+                            self.exchange.update_paper_position_stop(eff_sl)
+
                     # 청산 신호 처리
                     if analysis["signal"] == SignalType.EXIT and position is not None:
                         exit_price = analysis.get("exit_price", current_price)
@@ -198,7 +205,9 @@ class QuantTradingBot:
                             )
                             if success:
                                 self.risk_manager.record_entry()
-                                if hasattr(self.strategy, "last_entry_bar_time"):
+                                if hasattr(self.strategy, "record_entry_state"):
+                                    self.strategy.record_entry_state(analysis.get("bar_time"), entry_price)
+                                elif hasattr(self.strategy, "last_entry_bar_time"):
                                     self.strategy.last_entry_bar_time = analysis.get("bar_time")
                                 notifier.notify_entry(
                                     symbol=self.config.symbol,

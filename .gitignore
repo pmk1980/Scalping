@@ -14,8 +14,10 @@ venv/
 .venv/
 ENV/
 
-# Large CSV Backtest datasets
+# Large CSV Backtest datasets & state files
 data/*.csv
+data/*.json
+data/*.tmp
 !data/.gitkeep
 
 # IDE & OS

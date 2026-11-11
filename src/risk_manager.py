@@ -8,6 +8,8 @@ if sys.platform.startswith("win"):
     except Exception:
         pass
 
+from .state_manager import state_manager
+
 class RiskManager:
     """
     🛡️ 다중 서킷 브레이커 & 리스크 관리 엔진
@@ -40,20 +42,53 @@ class RiskManager:
         self.current_date = datetime.date.today()
         self.current_month = (self.current_date.year, self.current_date.month)
 
-        self.initial_monthly_balance = 0.0
-        self.current_monthly_pnl = 0.0
+        # 영속적 상태 로드
+        saved = state_manager.get_section("risk_manager")
+        saved_date_str = saved.get("current_date")
+        if saved_date_str and saved_date_str == str(self.current_date):
+            self.initial_daily_balance = float(saved.get("initial_daily_balance", 0.0))
+            self.current_daily_pnl = float(saved.get("current_daily_pnl", 0.0))
+            self.daily_trade_count = int(saved.get("daily_trade_count", 0))
+        else:
+            self.initial_daily_balance = 0.0
+            self.current_daily_pnl = 0.0
+            self.daily_trade_count = 0
 
-        self.initial_daily_balance = 0.0
-        self.current_daily_pnl = 0.0
-        self.daily_trade_count = 0
+        saved_month = saved.get("current_month")
+        if saved_month and tuple(saved_month) == self.current_month:
+            self.initial_monthly_balance = float(saved.get("initial_monthly_balance", 0.0))
+            self.current_monthly_pnl = float(saved.get("current_monthly_pnl", 0.0))
+        else:
+            self.initial_monthly_balance = 0.0
+            self.current_monthly_pnl = 0.0
 
-        self.consecutive_losses = 0
-        self.cooldown_until: Optional[datetime.datetime] = None
+        self.consecutive_losses = int(saved.get("consecutive_losses", 0))
+        cooldown_str = saved.get("cooldown_until")
+        self.cooldown_until: Optional[datetime.datetime] = (
+            datetime.datetime.fromisoformat(cooldown_str) if cooldown_str else None
+        )
 
-        self.total_trades = 0
-        self.win_trades = 0
-        self.loss_trades = 0
-        self.total_realized_pnl = 0.0
+        self.total_trades = int(saved.get("total_trades", 0))
+        self.win_trades = int(saved.get("win_trades", 0))
+        self.loss_trades = int(saved.get("loss_trades", 0))
+        self.total_realized_pnl = float(saved.get("total_realized_pnl", 0.0))
+
+    def _save_state(self):
+        state_manager.update_section("risk_manager", {
+            "current_date": str(self.current_date),
+            "current_month": list(self.current_month),
+            "initial_daily_balance": self.initial_daily_balance,
+            "current_daily_pnl": self.current_daily_pnl,
+            "daily_trade_count": self.daily_trade_count,
+            "initial_monthly_balance": self.initial_monthly_balance,
+            "current_monthly_pnl": self.current_monthly_pnl,
+            "consecutive_losses": self.consecutive_losses,
+            "cooldown_until": self.cooldown_until.isoformat() if self.cooldown_until else None,
+            "total_trades": self.total_trades,
+            "win_trades": self.win_trades,
+            "loss_trades": self.loss_trades,
+            "total_realized_pnl": self.total_realized_pnl
+        })
 
     def reset_stats_if_needed(self, current_balance: float):
         if current_balance <= 0:
@@ -61,12 +96,14 @@ class RiskManager:
 
         today = datetime.date.today()
         month_tuple = (today.year, today.month)
+        changed = False
 
         # 1. 월간 리셋
         if month_tuple != self.current_month or self.initial_monthly_balance <= 0.0:
             self.current_month = month_tuple
             self.initial_monthly_balance = current_balance
             self.current_monthly_pnl = 0.0
+            changed = True
             print(f"📅 [RiskManager] 새 월 시작! 월간 기준 잔고: ${self.initial_monthly_balance:,.2f}")
 
         # 2. 일일 리셋
@@ -75,7 +112,11 @@ class RiskManager:
             self.initial_daily_balance = current_balance
             self.current_daily_pnl = 0.0
             self.daily_trade_count = 0
+            changed = True
             print(f"🔄 [RiskManager] 새 거래일 시작! 일일 기준 잔고: ${self.initial_daily_balance:,.2f}")
+
+        if changed:
+            self._save_state()
 
     def can_open_position(self, current_balance: float) -> Tuple[bool, str]:
         self.reset_stats_if_needed(current_balance)
@@ -106,6 +147,7 @@ class RiskManager:
     def record_entry(self):
         """신규 포지션 진입 시 일일 카운터 증가"""
         self.daily_trade_count += 1
+        self._save_state()
 
     def record_trade_result(self, pnl: float, is_partial: bool = False):
         """거래 결과(손익) 기록 및 쿨다운 관리"""
@@ -124,6 +166,7 @@ class RiskManager:
         self.total_realized_pnl += pnl
         self.current_daily_pnl += pnl
         self.current_monthly_pnl += pnl
+        self._save_state()
 
     def update_trailing_stop(self, position: Dict[str, Any], current_price: float) -> Optional[float]:
         if not position.get("tp1_hit", False):

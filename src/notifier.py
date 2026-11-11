@@ -1,6 +1,7 @@
 import os
 import json
 import urllib.request
+import threading
 from typing import Optional
 from dotenv import load_dotenv
 
@@ -13,10 +14,10 @@ else:
 
 class TelegramNotifier:
     """
-    텔레그램 스마트폰 실시간 알림 엔진
+    텔레그램 스마트폰 실시간 알림 엔진 (비동기 스레드 전송 지원)
     - .env에 TELEGRAM_BOT_TOKEN과 TELEGRAM_CHAT_ID가 설정되어 있으면 알림 전송
     - 미설정 시 오류 없이 조용히 통과(Graceful Skip)
-    - UTF-8 JSON 기반 전송으로 이모지 및 한국어 완벽 지원
+    - 메인 루프 블로킹 방지를 위한 비동기 스레드(daemon=True) 발송
     """
     def __init__(self):
         self.bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -24,10 +25,7 @@ class TelegramNotifier:
         enabled_env = os.getenv("TELEGRAM_ENABLED", "true").lower() in ("true", "1", "yes")
         self.is_enabled = bool(self.bot_token and self.chat_id and enabled_env)
 
-    def send_message(self, text: str) -> bool:
-        if not self.is_enabled:
-            return False
-
+    def _send_sync(self, text: str) -> bool:
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
         payload = {
             "chat_id": self.chat_id,
@@ -39,11 +37,20 @@ class TelegramNotifier:
         req = urllib.request.Request(url, data=data, headers=headers)
 
         try:
-            with urllib.request.urlopen(req, timeout=10) as response:
+            with urllib.request.urlopen(req, timeout=5) as response:
                 return response.status == 200
         except Exception as e:
-            print(f"⚠️ [Telegram Alert Error]: {e}")
+            # 타임아웃이나 네트워크 순단 시 조용히 스킵 (메인 루프 영향 차단)
             return False
+
+    def send_message(self, text: str) -> bool:
+        if not self.is_enabled:
+            return False
+
+        # 비동기 백그라운드 스레드로 발송하여 봇 메인 루프 지연 0초 달성
+        t = threading.Thread(target=self._send_sync, args=(text,), daemon=True)
+        t.start()
+        return True
 
     def notify_startup(self, symbol: str, balance: float, mode: str, leverage: int):
         msg = (

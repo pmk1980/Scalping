@@ -1,4 +1,5 @@
 import sys
+import time
 from typing import Dict, Any, List, Optional, Tuple
 import ccxt
 import pandas as pd
@@ -10,6 +11,7 @@ if sys.platform.startswith("win"):
         pass
 
 from .config import BotConfig
+from .state_manager import state_manager
 
 class BitgetExchange:
     """
@@ -36,9 +38,12 @@ class BitgetExchange:
         self.markets = None
         self.market_info = None
 
-        # 가상 거래(Dry Run) 계좌 상태 (초기 시드: 100만 원 = ~$750 USDT)
-        self.paper_balance = 750.0
-        self.paper_position: Optional[Dict[str, Any]] = None
+        # 가상 거래(Dry Run) 영속적 계좌 상태 로드 (기본 시드: $750 USDT)
+        saved_account = state_manager.get_section("paper_account")
+        self.paper_balance = float(saved_account.get("balance", 750.0))
+        self.paper_position: Optional[Dict[str, Any]] = saved_account.get("position", None)
+        if self.paper_position:
+            print(f"🔄 [StateManager] 기존 가상 포지션 복원: {self.paper_position['side']} {self.paper_position.get('size')}개 @ ${self.paper_position.get('entry_price', 0):,.2f}")
 
     def initialize(self):
         print("🔗 [BitgetExchange] 비트겟 마켓 정보 동기화 중...")
@@ -165,6 +170,16 @@ class BitgetExchange:
                 amount = min_a
         return amount
 
+    def update_paper_position_stop(self, sl: float):
+        """가상 포지션의 추종 스탑선 갱신 및 파일 영속화"""
+        if self.dry_run and self.paper_position:
+            if sl > self.paper_position.get("stop_loss", 0.0):
+                self.paper_position["stop_loss"] = sl
+                state_manager.update_section("paper_account", {
+                    "balance": self.paper_balance,
+                    "position": self.paper_position
+                })
+
     def open_position(
         self,
         side: str,
@@ -175,7 +190,7 @@ class BitgetExchange:
         atr: float = 0.0
     ) -> bool:
         """
-        포지션 오픈 (Post-Only 지정가 우선 주문)
+        포지션 오픈 (Post-Only 지정가 우선 주문 + 중복 방지 가드)
         """
         amount = self.round_amount(amount)
         best_bid, best_ask = self.fetch_orderbook_best_price()
@@ -203,36 +218,80 @@ class BitgetExchange:
                 "lowest_p": order_price,
                 "entry_fee": fee
             }
+            # 영속적 상태 저장
+            state_manager.update_section("paper_account", {
+                "balance": self.paper_balance,
+                "position": self.paper_position
+            })
             print(f"🧪 [Dry-Run] 체결 완료 | 투입 증거금: ${margin:.2f} | 수수료: ${fee:.4f} | 가용 잔고: ${self.paper_balance:,.2f}")
             return True
 
-        # 실거래 모드 (Post-Only 지정가 우선 발주)
+        # 실거래 모드 (Post-Only 지정가 발주 + 중복 누적 방지 가드)
         try:
+            # 1. 기존 미체결 주문 검사 및 안전 정리 (중복 주문 방지)
+            try:
+                open_orders = self.client.fetch_open_orders(self.config.symbol)
+                if open_orders:
+                    print(f"⚠️ [Order Guard] 기존 미체결 주문 {len(open_orders)}건 발견 -> 전량 취소 후 재발주")
+                    for o in open_orders:
+                        self.client.cancel_order(o["id"], self.config.symbol)
+            except Exception as e_clean:
+                print(f"ℹ️ 미체결 정리 알림: {e_clean}")
+
+            # 2. 주문 발주
             order_side = "buy" if side == "BUY" else "sell"
             params = {"postOnly": True}
-            order = self.client.create_limit_order(
-                symbol=self.config.symbol,
-                side=order_side,
-                amount=amount,
-                price=order_price,
-                params=params
-            )
-            print(f"✅ [Live Maker Order] 포스트 온리 지정가 주문 접수 완료: ID {order.get('id')}")
-            return True
-        except Exception as e:
-            print(f"⚠️ [Post-Only 거부]: {e} -> 일반 지정가 주문 시도")
             try:
+                order = self.client.create_limit_order(
+                    symbol=self.config.symbol,
+                    side=order_side,
+                    amount=amount,
+                    price=order_price,
+                    params=params
+                )
+            except Exception as e_post:
+                print(f"⚠️ [Post-Only 거부]: {e_post} -> 일반 지정가 주문으로 전환 발주")
                 order = self.client.create_limit_order(
                     symbol=self.config.symbol,
                     side=order_side,
                     amount=amount,
                     price=order_price
                 )
-                print(f"✅ [Live Limit Order] 지정가 주문 접수 완료: ID {order.get('id')}")
-                return True
-            except Exception as e2:
-                print(f"❌ [Order Error] 주문 실패: {e2}")
+
+            order_id = order.get("id")
+            print(f"✅ [Live Order] 지정가 주문 접수 완료: ID {order_id} -> 체결 대기(최대 10초)...")
+
+            # 3. 체결 대기 루프 (미체결 방치로 인한 주문 누적 원천 방지)
+            filled = False
+            for _ in range(5):
+                time.sleep(2)
+                try:
+                    check_o = self.client.fetch_order(order_id, self.config.symbol)
+                    status = check_o.get("status")
+                    if status == "closed":
+                        filled = True
+                        print(f"🎯 [Order Filled] 주문 ID {order_id} 체결 완료!")
+                        break
+                    elif status == "canceled":
+                        print(f"🛑 [Order Canceled] 주문 ID {order_id} 취소됨")
+                        break
+                except Exception:
+                    pass
+
+            # 10초 내 미체결 시 취소 처리하여 다음 기회 대기
+            if not filled:
+                try:
+                    self.client.cancel_order(order_id, self.config.symbol)
+                    print(f"⏳ [Order Timeout] 10초 내 미체결로 주문 ID {order_id} 안전 취소 (주문 누적 방지)")
+                except Exception:
+                    pass
                 return False
+
+            return True
+
+        except Exception as e:
+            print(f"❌ [Order Error] 주문 발주 실패: {e}")
+            return False
 
     def close_position(self, current_price: float, reason: str = "SIGNAL") -> Optional[float]:
         """포지션 전량 청산 (Taker 시장가 또는 지정가)"""
@@ -252,6 +311,11 @@ class BitgetExchange:
             self.paper_balance += (margin + net_pnl)
             print(f"🎯 [Dry-Run 전량 청산] {side} ({reason}) @ ${current_price:,.2f} | 손익: {net_pnl:+,.2f} USDT | 총 잔고: ${self.paper_balance:,.2f}")
             self.paper_position = None
+            # 영속적 상태 저장
+            state_manager.update_section("paper_account", {
+                "balance": self.paper_balance,
+                "position": None
+            })
             return net_pnl
 
         # 실거래 모드
@@ -267,7 +331,16 @@ class BitgetExchange:
                 params={"reduceOnly": True}
             )
             print(f"✅ [Live Full Close] 전량 청산 주문 체결: ID {order.get('id')} ({reason})")
-            return float(curr_pos.get("unrealized_pnl", 0.0))
+
+            # 수수료 차감 정밀 net_pnl 산출
+            gross_pnl = float(curr_pos.get("unrealized_pnl", 0.0))
+            close_val = curr_pos["size"] * current_price
+            fee = close_val * self.config.taker_fee_rate
+            net_pnl = gross_pnl - fee
+            return net_pnl
+        except Exception as e:
+            print(f"❌ [Close Error] 포지션 청산 오류: {e}")
+            return None
         except Exception as e:
             print(f"❌ [Close Error] 포지션 청산 오류: {e}")
             return None

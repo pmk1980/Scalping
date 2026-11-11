@@ -10,6 +10,8 @@ if sys.platform.startswith("win"):
     except Exception:
         pass
 
+from .state_manager import state_manager
+
 class SignalType(Enum):
     NONE = "NONE"
     BUY = "BUY"    # 롱 진입
@@ -51,14 +53,34 @@ class MacroDonchianStrategy:
         self.max_rsi_entry = max_rsi_entry
         self.min_adx_entry = min_adx_entry
 
-        self.last_entry_bar_time: Optional[Any] = None
-        self.position_highest_price: Optional[float] = None
-        self.break_even_activated: bool = False
+        # 영속적 전략 상태 로드
+        saved_strat = state_manager.get_section("strategy")
+        self.last_entry_bar_time: Optional[Any] = saved_strat.get("last_entry_bar_time", None)
+        self.position_highest_price: Optional[float] = saved_strat.get("position_highest_price", None)
+        self.break_even_activated: bool = bool(saved_strat.get("break_even_activated", False))
+
+        if self.break_even_activated:
+            print(f"🔄 [StateManager] 기존 본전스탑(BE) 활성 상태 복원 (최고도달가: ${self.position_highest_price:,.2f})")
 
     def reset_position_tracker(self):
-        """포지션 청산 후 추적 변수 초기화"""
+        """포지션 청산 후 추적 변수 초기화 및 영속화"""
         self.position_highest_price = None
         self.break_even_activated = False
+        state_manager.update_section("strategy", {
+            "position_highest_price": None,
+            "break_even_activated": False
+        })
+
+    def record_entry_state(self, bar_time: Any, entry_price: float):
+        """신규 포지션 진입 시 상태 저장"""
+        self.last_entry_bar_time = bar_time
+        self.position_highest_price = entry_price
+        self.break_even_activated = False
+        state_manager.update_section("strategy", {
+            "last_entry_bar_time": str(bar_time),
+            "position_highest_price": entry_price,
+            "break_even_activated": False
+        })
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
@@ -121,10 +143,14 @@ class MacroDonchianStrategy:
             entry_price = float(current_position.get("entry_price", current_price))
             
             # 최고가 추적 갱신
+            updated_highest = False
+            cur_bar_high = float(last["high"])
             if self.position_highest_price is None:
-                self.position_highest_price = max(entry_price, current_price, float(last["high"]))
-            else:
-                self.position_highest_price = max(self.position_highest_price, current_price, float(last["high"]))
+                self.position_highest_price = max(entry_price, current_price, cur_bar_high)
+                updated_highest = True
+            elif max(current_price, cur_bar_high) > self.position_highest_price:
+                self.position_highest_price = max(current_price, cur_bar_high)
+                updated_highest = True
 
             # 기본 채널 중간선 스탑
             base_stop = float(prev["mid_n"])
@@ -136,8 +162,16 @@ class MacroDonchianStrategy:
 
             if self.use_break_even:
                 if self.position_highest_price >= be_target or self.break_even_activated:
-                    self.break_even_activated = True
+                    if not self.break_even_activated:
+                        self.break_even_activated = True
+                        updated_highest = True
                     effective_stop = max(base_stop, be_stop_price)
+
+            if updated_highest:
+                state_manager.update_section("strategy", {
+                    "position_highest_price": self.position_highest_price,
+                    "break_even_activated": self.break_even_activated
+                })
 
             # 저가가 실효 스탑선 이하로 내려간 경우 청산 신호
             if float(last["low"]) <= effective_stop:
@@ -152,12 +186,14 @@ class MacroDonchianStrategy:
                 return {
                     "signal": SignalType.EXIT,
                     "exit_price": fill_price,
+                    "effective_stop": effective_stop,
                     "reason": reason_str
                 }
 
             status_note = " [본전 방어 활성]" if self.break_even_activated else ""
             return {
                 "signal": SignalType.NONE,
+                "effective_stop": effective_stop,
                 "reason": f"포지션 유지 중{status_note} (스탑선: ${effective_stop:,.2f}, 현재가: ${current_price:,.2f})"
             }
 
